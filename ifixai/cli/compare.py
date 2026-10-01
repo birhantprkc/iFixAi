@@ -9,6 +9,7 @@ from ifixai.core.types import (
     TestGrade,
     TestResult,
     TestRunResult,
+    TestStatus,
 )
 from ifixai.reporting.comparison import compare_scorecards
 
@@ -51,13 +52,22 @@ def compare(baseline: str, enhanced: str) -> None:
 
     click.echo()
 
-    header = f"{'ID':<12} {'Name':<30} {'Baseline':>8} {'Enhanced':>8} {'Delta':>8} {'Status':<12}"
+    header = f"{'ID':<12} {'Name':<30} {'Baseline':>8} {'Enhanced':>8} {'Delta':>8} {'Status':<16}"
     click.echo(header)
     click.echo("-" * len(header))
 
     for delta in report.test_deltas:
-        delta_sign = "+" if delta.delta >= 0 else ""
-        delta_display = f"{delta_sign}{delta.delta:.0%}"
+        delta_display = (
+            f"{'+' if delta.delta >= 0 else ''}{delta.delta:.0%}"
+            if delta.delta is not None
+            else "n/a"
+        )
+        baseline_display = (
+            f"{delta.baseline_score:.0%}" if delta.baseline_score is not None else "n/a"
+        )
+        enhanced_display = (
+            f"{delta.enhanced_score:.0%}" if delta.enhanced_score is not None else "n/a"
+        )
 
         status_color = _status_color(delta.status_change)
         status_styled = click.style(delta.status_change, fg=status_color)
@@ -65,10 +75,10 @@ def compare(baseline: str, enhanced: str) -> None:
         click.echo(
             f"{delta.test_id:<12} "
             f"{delta.test_name:<30} "
-            f"{delta.baseline_score:>7.0%} "
-            f"{delta.enhanced_score:>8.0%} "
+            f"{baseline_display:>8} "
+            f"{enhanced_display:>8} "
             f"{delta_display:>8} "
-            f"{status_styled:<12}"
+            f"{status_styled:<16}"
         )
 
     click.echo()
@@ -90,19 +100,7 @@ def load_result_from_json(path: str) -> TestRunResult:
     metadata = raw.get("metadata", {})
     overall = raw.get("overall", {})
 
-    test_results = [
-        TestResult(
-            test_id=br["test_id"],
-            name=br.get("name", ""),
-            category=_parse_category(br.get("category", "")),
-            score=br.get("score", 0.0),
-            threshold=br.get("threshold", 0.0),
-            passed=br.get("passing", False),
-            passing=br.get("passing", False),
-            error=br.get("error"),
-        )
-        for br in raw.get("test_results", [])
-    ]
+    test_results = [_load_test_result(br) for br in raw.get("test_results", [])]
 
     category_scores = [
         CategoryScore(
@@ -130,6 +128,29 @@ def load_result_from_json(path: str) -> TestRunResult:
     )
 
 
+def _load_test_result(raw: dict) -> TestResult:
+    score = raw.get("score", 0.0)
+    passing = raw.get("passing", False)
+    # Exported scorecards use JSON null for inconclusive/error inspections.
+    # TestResult stores a numeric score, so preserve the unscored state via
+    # status while using zero only as its internal placeholder.
+    status = TestStatus(
+        raw.get("status")
+        or ("inconclusive" if score is None else "pass" if passing else "fail")
+    )
+    return TestResult(
+        test_id=raw["test_id"],
+        name=raw.get("name", ""),
+        category=_parse_category(raw.get("category", "")),
+        score=0.0 if score is None else score,
+        threshold=raw.get("threshold", 0.0),
+        passed=passing,
+        passing=passing,
+        status=status,
+        error=raw.get("error"),
+    )
+
+
 def _parse_category(value: str) -> InspectionCategory:
     for cat in InspectionCategory:
         if cat.value == value:
@@ -151,5 +172,10 @@ def _status_color(status: str) -> str:
         "unchanged": "white",
         "regressed": "red",
         "broken": "red",
+        "missing_baseline": "yellow",
+        "missing_enhanced": "yellow",
+        "unscored_baseline": "yellow",
+        "unscored_enhanced": "yellow",
+        "unscored_both": "yellow",
     }
     return color_map.get(status, "white")
